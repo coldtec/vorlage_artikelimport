@@ -4,8 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Artikelimport Vorlage befüllen</title>
-<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{--bg:#0b1116;--card:#121b22;--card2:#17232c;--line:#263843;--text:#edf7f8;--muted:#91a5ad;--accent:#2dd4bf;--bad:#fb7185}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#081015,#0e171d);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
@@ -30,7 +31,7 @@ button{border:0;background:var(--accent);color:#05201d;font-weight:900;padding:1
 
 <div class="card">
  <div class="step"><div class="num">2</div><h2>Vorlage befüllen</h2></div>
- <p class="muted">Die Datei <b style="color:var(--text)">Vorlage_Artikelimport.xlsx</b> ist hier und wartet auf Futter...</p>
+ <p class="muted">Die Datei <b style="color:var(--text)">Vorlage_Artikelimport.xlsx</b> wartet auf Futter...</p>
  <button id="run" disabled>Artikelimport erstellen</button>
 </div>
 
@@ -79,15 +80,9 @@ async function loadSource(file){
     if(parsed.errors.length && !parsed.data.length)throw new Error(parsed.errors[0].message);
     sourceRows=parsed.data;
   }else if(ext==="xlsx"){
-    const wb=new ExcelJS.Workbook();
-    await wb.xlsx.load(await file.arrayBuffer());
-    const ws=wb.worksheets[0];
-    sourceRows=[];
-    ws.eachRow({includeEmpty:false},row=>{
-      const arr=[];
-      for(let c=1;c<=Math.max(15,row.cellCount);c++)arr.push(val(row.getCell(c).value));
-      sourceRows.push(arr);
-    });
+    const wb=XLSX.read(await file.arrayBuffer(),{type:"array",raw:false});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    sourceRows=XLSX.utils.sheet_to_json(ws,{header:1,defval:"",raw:false});
   }else{
     throw new Error("Bitte eine CSV- oder XLSX-Datei auswählen.");
   }
@@ -105,6 +100,55 @@ async function loadSource(file){
  }
 }
 
+function xmlEscape(v){
+ return String(v??"")
+   .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+   .replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+}
+function colNumber(col){
+ let n=0; for(const ch of col)n=n*26+(ch.charCodeAt(0)-64); return n;
+}
+function cellXml(ref,value,styleAttr=""){
+ const txt=xmlEscape(value);
+ return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t xml:space="preserve">${txt}</t></is></c>`;
+}
+function setCellInSheet(xml,ref,value){
+ const rowNum=Number(ref.match(/\d+$/)[0]);
+ const col=ref.match(/^[A-Z]+/)[0];
+
+ // Existing cell: preserve only its style attribute and replace its value.
+ const cellRe=new RegExp(`<c\\s+([^>]*\\br="${ref}"[^>]*)>([\\s\\S]*?)<\\/c>|<c\\s+([^>]*\\br="${ref}"[^>]*)\\/>`);
+ const m=xml.match(cellRe);
+ if(m){
+   const attrs=(m[1]||m[3]||"");
+   const sm=attrs.match(/\bs="([^"]+)"/);
+   const style=sm?` s="${sm[1]}"`:"";
+   return xml.replace(cellRe,cellXml(ref,value,style));
+ }
+
+ // Find existing row.
+ const rowRe=new RegExp(`<row\\s+([^>]*\\br="${rowNum}"[^>]*)>([\\s\\S]*?)<\\/row>`);
+ const rm=xml.match(rowRe);
+ if(rm){
+   let body=rm[2];
+   const newCell=cellXml(ref,value);
+   const targetNo=colNumber(col);
+   const cells=[...body.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g)];
+   let inserted=false;
+   for(const c of cells){
+     if(colNumber(c[1])>targetNo){
+       body=body.replace(c[0],newCell+c[0]); inserted=true; break;
+     }
+   }
+   if(!inserted)body+=newCell;
+   return xml.replace(rowRe,`<row ${rm[1]}>${body}</row>`);
+ }
+
+ // Normally the template already contains the rows. If not, add the row before </sheetData>.
+ const newRow=`<row r="${rowNum}">${cellXml(ref,value)}</row>`;
+ return xml.replace("</sheetData>",newRow+"</sheetData>");
+}
+
 document.getElementById("run").onclick=async()=>{
  const btn=document.getElementById("run");
  try{
@@ -114,41 +158,50 @@ document.getElementById("run").onclick=async()=>{
   const response=await fetch(TEMPLATE,{cache:"no-store"});
   if(!response.ok)throw new Error(`Vorlage konnte nicht geladen werden (HTTP ${response.status}). Liegt "Vorlage_Artikelimport.xlsx" im gleichen GitHub-Ordner wie index.html?`);
 
-  const wb=new ExcelJS.Workbook();
-  await wb.xlsx.load(await response.arrayBuffer());
+  const zip=await JSZip.loadAsync(await response.arrayBuffer());
+  const sheetPath="xl/worksheets/sheet1.xml";
+  const sheetFile=zip.file(sheetPath);
+  if(!sheetFile)throw new Error("Tabelle1 / sheet1.xml wurde in der Vorlage nicht gefunden.");
 
-  const ws=wb.getWorksheet("Tabelle1") || wb.worksheets[0];
-  if(!ws)throw new Error("Tabelle1 wurde in der Vorlage nicht gefunden.");
-
+  let xml=await sheetFile.async("string");
   const dataRows=sourceRows.slice(1);
 
-  // Werte beginnen in Zeile 2. Die Vorlage selbst bleibt ansonsten unverändert.
+  // Ausschliesslich die vorgegebenen Zielzellen befüllen.
+  // Keine Spalten, Tabellenblätter, Formatierungen oder sonstigen Strukturen werden neu erzeugt.
   dataRows.forEach((src,i)=>{
     const targetRow=i+2;
     for(const [srcIndex,targetCols] of Object.entries(MAP)){
       const value=val(src[Number(srcIndex)] ?? "");
       for(const col of targetCols){
-        ws.getCell(`${col}${targetRow}`).value=value;
+        xml=setCellInSheet(xml,`${col}${targetRow}`,value);
       }
     }
   });
 
-  const buffer=await wb.xlsx.writeBuffer();
-  const blob=new Blob([buffer],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+  zip.file(sheetPath,xml);
+  const blob=await zip.generateAsync({
+    type:"blob",
+    mimeType:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    compression:"DEFLATE"
+  });
+
   const a=document.createElement("a");
-  a.href=URL.createObjectURL(blob);
+  const href=URL.createObjectURL(blob);
+  a.href=href;
   a.download="Artikelimport_ausgefüllt.xlsx";
   document.body.appendChild(a);a.click();a.remove();
-  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  setTimeout(()=>URL.revokeObjectURL(href),1500);
 
-  document.getElementById("doneText").textContent=`${dataRows.length.toLocaleString("de-CH")} Artikel wurden in die Vorlage übertragen.`;
+  document.getElementById("doneText").textContent=`${dataRows.length.toLocaleString("de-CH")} Artikel wurden in die unveränderte Vorlage übertragen.`;
   document.getElementById("done").classList.add("show");
   setStatus("Artikelimport erfolgreich erstellt.","good");
  }catch(e){
+  console.error(e);
   setStatus("FEHLER: "+e.message,"bad");
  }finally{
   btn.disabled=false;
  }
 };
+
 </script>
 </body></html>
