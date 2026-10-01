@@ -31,7 +31,7 @@ button{border:0;background:var(--accent);color:#05201d;font-weight:900;padding:1
 
 <div class="card">
  <div class="step"><div class="num">2</div><h2>Vorlage befüllen</h2></div>
- <p class="muted">Die Datei <b style="color:var(--text)">Vorlage_Artikelimport.xlsx</b> wartet auf Futter...</p>
+ <p class="muted">Die Datei <b style="color:var(--text)">Vorlage_Artikelimport.xlsx</b> ist hier und wartet auf Futter...</p>
  <button id="run" disabled>Artikelimport erstellen</button>
 </div>
 
@@ -115,38 +115,35 @@ function cellXml(ref,value,styleAttr=""){
 function setCellInSheet(xml,ref,value){
  const rowNum=Number(ref.match(/\d+$/)[0]);
  const col=ref.match(/^[A-Z]+/)[0];
+ const newCell=cellXml(ref,value);
 
- // Existing cell: preserve only its style attribute and replace its value.
- const cellRe=new RegExp(`<c\\s+([^>]*\\br="${ref}"[^>]*)>([\\s\\S]*?)<\\/c>|<c\\s+([^>]*\\br="${ref}"[^>]*)\\/>`);
- const m=xml.match(cellRe);
- if(m){
-   const attrs=(m[1]||m[3]||"");
-   const sm=attrs.match(/\bs="([^"]+)"/);
-   const style=sm?` s="${sm[1]}"`:"";
-   return xml.replace(cellRe,cellXml(ref,value,style));
- }
+ // Zelle existiert bereits
+ const cellRe=new RegExp(`<c\\b([^>]*\\br="${ref}"[^>]*)>([\\s\\S]*?)<\\/c>|<c\\b([^>]*\\br="${ref}"[^>]*)\\/>`);
+ if(cellRe.test(xml)) return xml.replace(cellRe,newCell);
 
- // Find existing row.
- const rowRe=new RegExp(`<row\\s+([^>]*\\br="${rowNum}"[^>]*)>([\\s\\S]*?)<\\/row>`);
+ // Zeile existiert bereits
+ const rowRe=new RegExp(`<row\\b([^>]*\\br="${rowNum}"[^>]*)>([\\s\\S]*?)<\\/row>`);
  const rm=xml.match(rowRe);
  if(rm){
-   let body=rm[2];
-   const newCell=cellXml(ref,value);
-   const targetNo=colNumber(col);
-   const cells=[...body.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g)];
-   let inserted=false;
+   let body=rm[2], targetNo=colNumber(col), inserted=false;
+   const cellToken=/<c\\b[^>]*\\br="([A-Z]+)\\d+"[^>]*(?:\\/>|>[\\s\\S]*?<\\/c>)/g;
+   const cells=[...body.matchAll(cellToken)];
    for(const c of cells){
-     if(colNumber(c[1])>targetNo){
-       body=body.replace(c[0],newCell+c[0]); inserted=true; break;
-     }
+     if(colNumber(c[1])>targetNo){body=body.replace(c[0],newCell+c[0]);inserted=true;break;}
    }
-   if(!inserted)body+=newCell;
-   return xml.replace(rowRe,`<row ${rm[1]}>${body}</row>`);
+   if(!inserted) body+=newCell;
+   return xml.replace(rowRe,`<row r="${rowNum}">${body}</row>`);
  }
 
- // Normally the template already contains the rows. If not, add the row before </sheetData>.
- const newRow=`<row r="${rowNum}">${cellXml(ref,value)}</row>`;
- return xml.replace("</sheetData>",newRow+"</sheetData>");
+ // Neue Datenzeile sauber innerhalb von sheetData anlegen
+ const newRow=`<row r="${rowNum}">${newCell}</row>`;
+ return xml.replace(/<\/sheetData>/,newRow+'</sheetData>');
+}
+function updateDimension(xml,lastRow){
+ const ref=`A1:AI${Math.max(1,lastRow)}`;
+ if(/<dimension\b[^>]*ref="[^"]*"[^>]*\/>/.test(xml))
+   return xml.replace(/<dimension\b[^>]*ref="[^"]*"[^>]*\/>/,`<dimension ref="${ref}"/>`);
+ return xml;
 }
 
 document.getElementById("run").onclick=async()=>{
@@ -177,6 +174,7 @@ document.getElementById("run").onclick=async()=>{
       }
     }
   });
+  xml=updateDimension(xml,dataRows.length+1);
 
   zip.file(sheetPath,xml);
   const blob=await zip.generateAsync({
