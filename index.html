@@ -126,7 +126,7 @@ function setCellInSheet(xml,ref,value){
  const rm=xml.match(rowRe);
  if(rm){
    let body=rm[2], targetNo=colNumber(col), inserted=false;
-   const cellToken=/<c\\b[^>]*\\br="([A-Z]+)\\d+"[^>]*(?:\\/>|>[\\s\\S]*?<\\/c>)/g;
+   const cellToken=/<c\b[^>]*\br="([A-Z]+)\d+"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g;
    const cells=[...body.matchAll(cellToken)];
    for(const c of cells){
      if(colNumber(c[1])>targetNo){body=body.replace(c[0],newCell+c[0]);inserted=true;break;}
